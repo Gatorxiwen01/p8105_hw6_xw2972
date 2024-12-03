@@ -1,0 +1,203 @@
+---
+title: "p8105_hw6_xw2972"
+author: "Xiwen Wu"
+output: github_document
+date: 2024-12-02
+---
+##Question 1:
+##The 95% confidence interval for R-squared [0.89, 0.93] shows the range of likely values for this statistic, reflecting the variability due to sampling.
+##The 95% confidence interval for beta product [1.96, 2.06] shows the plausible range of this derived parameter, offering insight into its stability.
+```{r}
+library(rnoaa)
+library(dplyr)
+library(ggplot2)
+library(broom)
+
+weather_df <- rnoaa::meteo_pull_monitors(
+  c("USW00094728"),
+  var = c("PRCP", "TMIN", "TMAX"), 
+  date_min = "2017-01-01",
+  date_max = "2017-12-31"
+) %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10
+  ) %>%
+  select(name, id, everything())
+
+n_bootstrap <- 5000
+
+set.seed(123) 
+bootstrap_results <- replicate(n_bootstrap, {
+
+  sampled_data <- weather_df %>% sample_frac(size = 1, replace = TRUE)
+  
+  lm_fit <- lm(tmax ~ tmin, data = sampled_data)
+  
+  r_squared <- glance(lm_fit)$r.squared
+  
+  coefs <- tidy(lm_fit) %>% pull(estimate)
+  log_beta_product <- log(coefs[1] * coefs[2])
+  
+  c(r_squared, log_beta_product)
+}, simplify = TRUE)
+
+
+bootstrap_df <- as.data.frame(t(bootstrap_results))
+names(bootstrap_df) <- c("r_squared", "log_beta_product")
+
+ci_r_squared <- quantile(bootstrap_df$r_squared, probs = c(0.025, 0.975))
+ci_log_beta_product <- quantile(bootstrap_df$log_beta_product, probs = c(0.025, 0.975))
+
+ggplot(bootstrap_df, aes(x = r_squared)) +
+  geom_density(fill = "blue", alpha = 0.5) +
+  labs(title = "Bootstrap Distribution of R-Squared",
+       x = "R-Squared", y = "Density") +
+  theme_minimal()
+
+ggplot(bootstrap_df, aes(x = log_beta_product)) +
+  geom_density(fill = "green", alpha = 0.5) +
+  labs(title = "Bootstrap Distribution of log(β0 * β1)",
+       x = "log(β0 * β1)", y = "Density") +
+  theme_minimal()
+
+list(
+  r_squared_CI = ci_r_squared,
+  log_beta_product_CI = ci_log_beta_product
+)
+```
+##Question 2:
+##Fresno CA has the highest adjusted ratio, while New York NY has the lowest adjusted ratio.
+```{r}
+library(dplyr)
+library(broom)
+library(ggplot2)
+library(purrr)
+library(tidyr)
+
+homicide_data <- read.csv("homicide-data.csv")
+
+homicide_data <- homicide_data %>%
+  mutate(
+    city_state = paste(city, state, sep = ", "),
+    solved = ifelse(disposition %in% c("Closed by arrest", "Closed without arrest"), 1, 0)
+  ) %>%
+  filter(
+    !(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")),
+    victim_race %in% c("White", "Black"),
+    !is.na(victim_age)
+  ) %>%
+  mutate(victim_age = as.numeric(victim_age))
+
+baltimore_data <- homicide_data %>%
+  filter(city_state == "Baltimore, MD")
+
+baltimore_glm <- glm(
+  solved ~ victim_age + victim_sex + victim_race,
+  data = baltimore_data,
+  family = binomial
+)
+
+baltimore_summary <- broom::tidy(baltimore_glm, conf.int = TRUE) %>%
+  filter(term == "victim_sexMale") %>%
+  mutate(
+    adjusted_or = exp(estimate),
+    ci_lower = exp(conf.low),
+    ci_upper = exp(conf.high)
+  )
+
+baltimore_summary
+
+city_results <- homicide_data %>%
+  group_by(city_state) %>%
+  nest() %>%
+  mutate(
+    model = map(data, ~ glm(solved ~ victim_age + victim_sex + victim_race, 
+                            data = ., family = binomial)),
+    tidy_model = map(model, ~ broom::tidy(., conf.int = TRUE)),
+    or_data = map(tidy_model, ~ .x %>% 
+                    filter(term == "victim_sexMale") %>%
+                    mutate(
+                      adjusted_or = exp(estimate),
+                      ci_lower = exp(conf.low),
+                      ci_upper = exp(conf.high)
+                    ))
+  ) %>%
+  unnest(or_data, keep_empty = TRUE) %>%
+  select(city_state, adjusted_or, ci_lower, ci_upper)
+
+city_results <- city_results %>%
+  arrange(adjusted_or)
+
+ggplot(city_results, aes(x = reorder(city_state, adjusted_or), y = adjusted_or)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2) +
+  coord_flip() +
+  labs(
+    title = "Adjusted Odds Ratios for Solving Homicides by City",
+    x = "City, State",
+    y = "Adjusted Odds Ratio (Male vs Female Victims)"
+  ) +
+  theme_minimal()
+```
+##Question 3:
+```{r}
+library(rsample)
+library(modelr)
+library(broom)
+library(ggplot2)
+library(purrr)
+
+birthweight_df <- read.csv("birthweight.csv")
+
+birthweight_df$babysex <- as.factor(birthweight_df$babysex)
+birthweight_df$frace <- factor(birthweight_df$frace, levels = c(1, 2, 3, 4, 8, 9))
+birthweight_df$mrace <- factor(birthweight_df$mrace, levels = c(1, 2, 3, 4, 8))
+
+model_1 <- lm(bwt ~ gaweeks + delwt + babysex, data = birthweight_df)
+
+birthweight_df <- add_residuals(birthweight_df, model_1, var = "resid_1")
+birthweight_df <- add_predictions(birthweight_df, model_1, var = "fitted_1")
+
+ggplot(birthweight_df, aes(x = fitted_1, y = resid_1)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Residuals vs Fitted Values", x = "Fitted Values", y = "Residuals")
+
+set.seed(123)
+cv_splits <- vfold_cv(birthweight_df, v = 5)
+
+models <- map(cv_splits$splits, ~ lm(bwt ~ gaweeks + delwt + babysex, data = analysis(.x)))
+
+cv_rmse_results <- map_dbl(models, ~ {
+  preds <- predict(.x, newdata = analysis(cv_splits$splits[[1]]))
+  sqrt(mean((preds - analysis(cv_splits$splits[[1]])$bwt)^2))
+})
+
+model_2 <- lm(bwt ~ blength + gaweeks, data = birthweight_df)
+
+model_3 <- lm(bwt ~ bhead * blength * babysex, data = birthweight_df)
+
+cv_results_2 <- map(cv_splits$splits, ~ lm(bwt ~ blength + gaweeks, data = analysis(.x)))
+cv_results_3 <- map(cv_splits$splits, ~ lm(bwt ~ bhead * blength * babysex, data = analysis(.x)))
+
+cv_rmse_results_2 <- map_dbl(cv_results_2, ~ {
+  preds <- predict(.x, newdata = analysis(cv_splits$splits[[1]]))
+  sqrt(mean((preds - analysis(cv_splits$splits[[1]])$bwt)^2))
+})
+
+cv_rmse_results_3 <- map_dbl(cv_results_3, ~ {
+  preds <- predict(.x, newdata = analysis(cv_splits$splits[[1]]))
+  sqrt(mean((preds - analysis(cv_splits$splits[[1]])$bwt)^2))
+})
+
+cv_rmse_results
+
+cv_rmse_comparison <- tibble(
+  Model = c("Model 1", "Model 2", "Model 3"),
+  RMSE = c(mean(cv_rmse_results), mean(cv_rmse_results_2), mean(cv_rmse_results_3))
+)
+
+print(cv_rmse_comparison)
+```
